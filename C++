@@ -1,0 +1,270 @@
+#include <SoftwareSerial.h>
+#include <Adafruit_LPS35HW.h>
+
+
+SoftwareSerial HC12(10, 11); // HC-12 TX Pin, HC-12 RX Pin
+Adafruit_LPS35HW lps35hw;
+
+
+const unsigned long dataInterval = 180000; // Data collection interval (30 seconds)
+const unsigned long readingInterval = 5000; // Sensor reading interval (5 seconds)
+const unsigned long transmissionDelay = 500; // Transmission delay between data (1 second)
+
+
+unsigned long lastTransmissionTime = 0;
+unsigned long lastReadingTime = 0;
+unsigned long counterStartTime = 0;
+unsigned long initialTimerStartTime = 0;
+
+
+String dataBuffer = ""; // Buffer to store accumulated sensor data
+float highestPressure = 0; // Variable to store the highest pressure recorded
+
+
+int currentState = 0; // State machine variable (0 means initial state)
+
+
+const int relayPin2 = 6; // Relay module channel 2 connected to pin 3
+const int relayPin3 = 5; // Relay module channel 3 connected to pin 4
+const int relayPin4 = 4; // Relay module channel 4 connected to pin 5
+const int relayPin5 = 3; // Relay module channel 5 connected to pin 6
+
+
+// Activation delays for each counter state (in milliseconds)
+unsigned long counterActivationDelays[] = {1000, 20000, 30000, 20000, 30000, 40000, 60000, 80000}; //the list starts at 0-11 edit only timers 1,2,3,4 (for deflating/filling) and 10,11(for delay period between each profile)
+
+
+unsigned long counterTransitionDelay = 1000; // Delay between counter transitions (5 seconds)
+
+
+// Delay before sending the initial message (30 seconds)
+unsigned long initialMessageDelay = 60000;
+unsigned long initialMessageStartTime;
+bool initialMessageSent = false;
+
+
+// Initial timer delay before Counter 1 starts (15 seconds)
+unsigned long initialTimerDelay = 60000;
+bool initialTimerExpired = false;
+
+
+void setup() {
+   Serial.begin(9600); // Start serial communication for debugging
+   HC12.begin(9600); // Start HC-12 serial communication
+   initialMessageStartTime = millis(); // Record the start time of the initial message delay
+   pinMode(relayPin2, OUTPUT);
+   pinMode(relayPin3, OUTPUT);
+   pinMode(relayPin4, OUTPUT);
+   pinMode(relayPin5, OUTPUT);
+   lps35hw.begin_I2C();
+}
+
+
+void loop() {
+   unsigned long currentTime = millis();
+
+
+   // Check if it's time to capture sensor readings
+   if (currentTime - lastReadingTime >= readingInterval) {
+       captureSensorData(); // Capture sensor data
+       lastReadingTime = currentTime; // Update last reading time
+   }
+
+
+   // Check if it's time to transmit all accumulated data
+   if (currentTime - lastTransmissionTime >= dataInterval) {
+       sendBufferedData(); // Transmit data via HC-12
+       lastTransmissionTime = currentTime; // Update last transmission time
+   }
+
+
+   float pressure_hpa = lps35hw.readPressure();
+   float pressure_pa = pressure_hpa * 100;
+
+
+   // Check if initial message delay has passed and message hasn't been sent yet
+   if (!initialMessageSent && currentTime - initialMessageStartTime >= initialMessageDelay) {
+       HC12.println("Crubotics"); // Send initial message via HC-12
+       initialMessageSent = true; // Set flag to indicate that initial message has been sent
+   }
+
+
+   // Check if initial timer delay has passed
+   if (!initialTimerExpired && currentTime - initialMessageStartTime >= initialTimerDelay) {
+       initialTimerExpired = true; // Set flag to indicate that initial timer has expired
+   }
+
+
+   // State machine to control counter activations and transitions
+   switch (currentState) {
+       case 0: // Initial state
+           if (initialTimerExpired && currentTime - lastReadingTime >= counterActivationDelays[0]) {
+               activateCounter(1, "Counter 1.1"); // Activate counter 1.1
+               counterStartTime = currentTime; // Record start time of counter 1.1
+           }
+           break;
+       case 1: // Counter 1.1 active
+           if (currentTime - counterStartTime >= counterActivationDelays[1] + counterTransitionDelay) {
+               deactivateCounter(1); // Deactivate counter 1.1
+               activateCounter(4, "Counter 4.1"); // Activate counter 2.1
+               counterStartTime = currentTime; // Record start time of counter 2.1
+           }
+           break;
+       case 2:
+            if (currentTime - counterStartTime >= counterActivationDelays[5] + counterTransitionDelay){
+             deactivateCounter(4); // Deactivate counter 1.1
+               activateCounter(2, "Counter 2.1"); // Activate counter 2.1
+               counterStartTime = currentTime; // Record start time of counter 2.1
+           }
+           break; //sink #1
+
+
+       case 3: // Counter 2.1 active
+           if (currentTime - counterStartTime >= counterActivationDelays[2] + counterTransitionDelay) {
+               deactivateCounter(2); // Deactivate counter 2.1
+               activateCounter(4, "Counter 1.2"); // Activate counter 1.2
+               counterStartTime = currentTime; // Record start time of counter 1.2
+           }
+           break;
+      case 4:
+            if (currentTime - counterStartTime >= counterActivationDelays[6] + counterTransitionDelay){
+             deactivateCounter(4); // Deactivate counter 1.1
+               activateCounter(1, "Counter 2.1"); // Activate counter 2.1
+               counterStartTime = currentTime; // Record start time of counter 2.1 //float #1 finish
+           }
+           break; //float
+      case 5: // Counter 1.2 active
+           if (currentTime - counterStartTime >= counterActivationDelays[3] + counterTransitionDelay) {
+               deactivateCounter(1); // Deactivate counter 1.2
+               activateCounter(4, "Counter 2.2"); // Activate counter 2.2
+               counterStartTime = currentTime; // Record start time of counter 2.2
+           }
+           break;
+      
+       case 6:
+        if (currentTime - counterStartTime >= counterActivationDelays[5] + counterTransitionDelay){
+             deactivateCounter(4); // Deactivate counter 1.1
+               activateCounter(2, "Counter 2.1"); // Activate counter 2.1
+               counterStartTime = currentTime; // Record start time of counter 2.1 //sink #2
+           }
+           break;
+
+
+       case 7: // Counter 1.2 active
+            if (currentTime - counterStartTime >= counterActivationDelays[4] + counterTransitionDelay) {
+               deactivateCounter(2); // Deactivate counter 2.2
+               activateCounter(4, "Counter 3.1"); // Activate counter 3.1
+               counterStartTime = currentTime; // Record start time of counter 3.1
+           }
+           break;
+       case 8:
+         if (currentTime - counterStartTime >= counterActivationDelays[7] + counterTransitionDelay) {
+               deactivateCounter(4); // Deactivate counter 2.2
+               activateCounter(3, "Counter 3.1"); // Activate counter 3.1
+               counterStartTime = currentTime; // Record start time of counter 3.1 //float #2 finish
+         }
+       currentState++; // Move to the next state (stop state)
+       break;
+
+
+   default:
+       // All counters deactivated, do nothing
+       break;
+   }
+}
+
+
+void captureSensorData() {
+   float temperature = lps35hw.readTemperature();
+   float pressure_hpa = lps35hw.readPressure();
+   float pressure_pa = pressure_hpa * 100;
+
+
+   if (pressure_pa > highestPressure) {
+       highestPressure = pressure_pa;
+   }
+
+
+   String sensorData = "T: " + String(temperature) + " C, P: " + String(pressure_pa) + " Pa, Highest P: " + String(highestPressure) + " Pa\n";
+   dataBuffer += sensorData;
+   Serial.println("Sensor data captured: " + sensorData);
+}
+
+
+void sendBufferedData() {
+   int pos = 0;
+   while (pos < dataBuffer.length()) {
+       int lineEnd = dataBuffer.indexOf('\n', pos);
+       if (lineEnd == -1) {
+           lineEnd = dataBuffer.length();
+       }
+       String line = dataBuffer.substring(pos, lineEnd);
+       String message = "[PCHS] " + line;
+       HC12.println(message);
+       Serial.println("Data sent via HC-12: " + message);
+       delay(transmissionDelay);
+       pos = lineEnd + 1;
+   }
+   dataBuffer = ""; // Clear the buffer after sending
+}
+
+
+void activateCounter(int counter, String counterName) {
+   switch (counter) {
+       case 1:
+           digitalWrite(relayPin2, LOW); // relayPin2 for counter 1
+           digitalWrite(relayPin3, LOW); // relayPin3 for counter 1
+           digitalWrite(relayPin4, HIGH); // relayPin4 for counter 1
+           digitalWrite(relayPin5, HIGH); // relayPin5 for counter 1
+           HC12.println(counterName + " Activated"); // Transmit counter activation via HC-12
+           break;
+       case 2:
+           digitalWrite(relayPin2, HIGH); // relayPin2 for counter 2
+           digitalWrite(relayPin3, HIGH); // relayPim3 for counter 2
+           digitalWrite(relayPin4, LOW); // relayPin4 for counter 2
+           digitalWrite(relayPin5, LOW); // relayPin5 for counter 2
+           HC12.println(counterName + " Activated"); // Transmit counter activation via HC-12
+           break;
+       case 3:
+           digitalWrite(relayPin2, HIGH); // relayPin2 for counter 3
+           digitalWrite(relayPin3, HIGH); // relayPin3 for counter 3
+           digitalWrite(relayPin4, LOW); // relayPin4 for counter 3
+           digitalWrite(relayPin5, LOW); // relayPin5 for counter 3
+           HC12.println(counterName + " Activated"); // Transmit counter activation via HC-12
+           break;
+       case 4:
+           digitalWrite(relayPin2, LOW); // relayPin2 for counter 3
+           digitalWrite(relayPin3, LOW); // relayPin3 for counter 3
+           digitalWrite(relayPin4, LOW); // relayPin4 for counter 3
+           digitalWrite(relayPin5, LOW); // relayPin5 for counter 3
+           HC12.println(counterName + " Activated"); // Transmit counter activation via HC-12
+           break;
+   }
+   currentState++; // Move to the next state
+   lastReadingTime = millis(); // Update last reading time
+}
+
+
+void deactivateCounter(int counter) {
+   switch (counter) {
+       case 1:
+           digitalWrite(relayPin2, LOW); // Deactivate relayPin2 for counter 1
+           digitalWrite(relayPin3, LOW); // Deactivate relayPin2 for counter 1
+           digitalWrite(relayPin4, LOW); // Deactivate relayPin2 for counter 1
+           digitalWrite(relayPin5, LOW); // Deactivate relayPin2 for counter 1
+           break;
+       case 2:
+           digitalWrite(relayPin2, LOW); // Deactivate relayPin2 for counter 1
+           digitalWrite(relayPin3, LOW); // Deactivate relayPin2 for counter 1
+           digitalWrite(relayPin4, LOW); // Deactivate relayPin2 for counter 1
+           digitalWrite(relayPin5, LOW); // Deactivate relayPin2 for counter 1
+           break;
+       case 3:
+           digitalWrite(relayPin2, LOW); // Deactivate relayPin2 for counter 1
+           digitalWrite(relayPin3, LOW); // Deactivate relayPin2 for counter 1
+           digitalWrite(relayPin4, LOW); // Deactivate relayPin2 for counter 1
+           digitalWrite(relayPin5, LOW); // Deactivate relayPin2 for counter 1
+           break;
+   }
+}
+
